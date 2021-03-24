@@ -1,0 +1,77 @@
+substitutions:
+  # GCS location to write temporary checkpoints and summaries.
+  _GCS_BUCKET: 'gs://wcromar-output/oss-presubmits/'
+  # Name of GKE cluster in which to run Job.
+  _CLUSTER_NAME: 'tensorflow-models-testing'
+  # Location of GKE cluster.
+  _CLUSTER_ZONE: 'us-central1'
+steps:
+- name: 'docker'
+  id: build-image
+  args: [
+    'build',
+    '.',
+    '-f', 'official/utils/testing/cloud/Dockerfile',
+    '-t', 'gcr.io/$PROJECT_ID/tensorflow_models/unit_test:$BUILD_ID'
+  ]
+- name: 'docker'
+  id: push-image
+  waitFor:
+  - build-image
+  args: ['push', 'gcr.io/$PROJECT_ID/tensorflow_models/unit_test:$BUILD_ID']
+- name: 'golang'
+  id: download-jsonnet
+  waitFor: ['-']
+  entrypoint: 'go'
+  args: [
+    'get',
+    'github.com/google/go-jsonnet/cmd/jsonnet',
+  ]
+- name: 'google/cloud-sdk'
+  id: clone-templates
+  waitFor: ['-']
+  entrypoint: 'git'
+  args: [
+    'clone',
+    'https://github.com/GoogleCloudPlatform/ml-testing-accelerators.git',
+  ]
+- name: 'golang'
+  id: build-templates
+  waitFor:
+  - download-jsonnet
+  - clone-templates
+  entrypoint: 'jsonnet'
+  args: [
+    'official/utils/testing/cloud/unit_test_job.jsonnet',
+    '-J', 'ml-testing-accelerators',
+    '--ext-str', 'image=gcr.io/$PROJECT_ID/tensorflow_models/unit_test',
+    '--ext-str', 'build_id=$BUILD_ID',
+    '--ext-str', 'gcs_bucket=$_GCS_BUCKET',
+    '-m', '.'
+  ]
+- name: 'google/cloud-sdk'
+  id: create-job
+  waitFor:
+  - push-image
+  - build-templates
+  entrypoint: bash
+  args:
+  - -c
+  - |
+    set -u
+    set -e
+    set -x
+
+    gcloud container clusters get-credentials --zone $_CLUSTER_ZONE $_CLUSTER_NAME
+    job_name=$(kubectl create -f tpu-tests.yaml -o name)
+    sleep 5
+    pod_name=$(kubectl wait --for condition=ready --timeout=10m pod -l job-name=${job_name#job.batch/} -o name)
+    kubectl logs -f $pod_name --container=train
+    sleep 5
+    exit $(kubectl get $pod_name -o jsonpath={.status.containerStatuses[0].state.terminated.exitCode})
+timeout: 1200s  # 20 minutes
+options:
+  volumes:
+  - name: go-modules
+    path: /go
+  machineType: E2_HIGHCPU_8
