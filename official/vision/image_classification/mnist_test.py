@@ -57,6 +57,7 @@ class KerasMnistTest(tf.test.TestCase, parameterized.TestCase):
   def test_end_to_end(self, distribution):
     """Test Keras MNIST model with `strategy`."""
 
+    assert False
     extra_flags = [
         "-train_epochs",
         "1",
